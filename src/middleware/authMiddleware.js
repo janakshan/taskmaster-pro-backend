@@ -2,63 +2,64 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
-const protect = async (req, res, next) => {
-    try {
-        let token;
+/**
+ * Protect routes - middleware to check if user is authenticated
+ */
+exports.protect = async (req, res, next) => {
+    let token;
 
-        // Check for token in headers
-        if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-            token = req.headers.authorization.split(' ')[1];
-        }
-        // Check for token in cookies
-        else if (req.cookies.token) {
-            token = req.cookies.token;
-        }
-
-        if (!token) {
-            return res.status(401).json({
-                message: 'Not authorized, no token',
-                code: 'NO_TOKEN'
-            });
-        }
-
+    // Check if token exists in Authorization header
+    if (
+        req.headers.authorization &&
+        req.headers.authorization.startsWith('Bearer')
+    ) {
         try {
+    // Get token from header
+            token = req.headers.authorization.split(' ')[1];
+
             // Verify token
             const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
             // Get user from token
-            const user = await User.findById(decoded.id).select('-password');
+            req.user = await User.findById(decoded.id).select('-password');
 
-            if (!user) {
+            // Update last active time
+            if (req.user) {
+                req.user.lastActive = Date.now();
+                await req.user.save({ validateBeforeSave: false });
+            } else {
                 return res.status(401).json({
-                    message: 'Not authorized, user not found',
-                    code: 'USER_NOT_FOUND'
+                    success: false,
+                    error: 'Not authorized, user not found'
                 });
             }
 
-            req.user = user;
             next();
         } catch (error) {
-            if (error.name === 'TokenExpiredError') {
-                return res.status(401).json({
-                    message: 'Token expired',
-                    code: 'TOKEN_EXPIRED'
-                });
-            } else if (error.name === 'JsonWebTokenError') {
-                return res.status(401).json({
-                    message: 'Invalid token',
-                    code: 'INVALID_TOKEN'
-                });
-            }
-            throw error;
+            console.error('Auth middleware error:', error);
+            res.status(401).json({
+                success: false,
+                error: 'Not authorized, invalid token'
+            });
         }
-    } catch (error) {
-        console.error('Auth middleware error:', error);
+    } else {
         res.status(401).json({
-            message: 'Not authorized, token failed',
-            code: 'AUTH_FAILED'
+            success: false,
+            error: 'Not authorized, no token'
         });
     }
 };
 
-module.exports = { protect };
+/**
+ * Admin only middleware - check if user is an admin
+ */
+exports.admin = (req, res, next) => {
+    if (req.user && req.user.role === 'admin') {
+        next();
+    } else {
+        res.status(403).json({
+            success: false,
+            error: 'Not authorized as an admin'
+        });
+    }
+};
