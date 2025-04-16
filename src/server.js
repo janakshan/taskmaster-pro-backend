@@ -31,7 +31,8 @@ if (process.env.NODE_ENV === 'development') {
 }
 
 // Routes
-app.use('/api/', require('./routes/authRoutes'));
+app.use('/api/auth', require('./routes/authRoutes'));
+app.use('/api/tasks', require('./routes/taskRoutes'));
 
 // Simple test route
 app.get('/', (req, res) => {
@@ -41,6 +42,7 @@ app.get('/', (req, res) => {
 // Error handling middleware
 app.use(notFound);
 app.use(errorHandler);
+
 
 // Start server
 const PORT = process.env.PORT || 5000;
