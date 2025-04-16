@@ -24,10 +24,28 @@ const taskSchema = new mongoose.Schema({
     dueDate: {
         type: Date
     },
+    completedAt: {
+        type: Date
+    },
     user: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
         required: true
+    },
+    // Add category field referencing Category model
+    category: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Category',
+        default: null
+    },
+    // Add tags array referencing Tag model
+    tags: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Tag'
+    }],
+    project: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Project'
     },
     parent: {
         type: mongoose.Schema.Types.ObjectId,
@@ -35,7 +53,24 @@ const taskSchema = new mongoose.Schema({
         default: null
     }
 }, {
-    timestamps: true
+    timestamps: true,
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true }
 });
 
-module.exports = mongoose.model('Task', taskSchema);
+// Virtual for subtasks
+taskSchema.virtual('subtasks', {
+    ref: 'Task',
+    localField: '_id',
+    foreignField: 'parent'
+});
+
+// Indexes for better query performance
+taskSchema.index({ user: 1, status: 1 });
+taskSchema.index({ dueDate: 1 });
+taskSchema.index({ category: 1 });
+taskSchema.index({ tags: 1 });
+
+const Task = mongoose.model('Task', taskSchema);
+
+module.exports = Task;

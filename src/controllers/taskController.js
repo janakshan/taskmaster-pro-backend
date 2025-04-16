@@ -1,324 +1,430 @@
 // src/controllers/taskController.js
 const Task = require('../models/Task');
+const Category = require('../models/Category');
+const Tag = require('../models/Tag');
+const mongoose = require('mongoose');
 
-// Get all tasks for the current user
-exports.getTasks = async (req, res, next) => {
-    try {
-        const tasks = await Task.find({ user: req.user._id });
-        res.json(tasks);
-    } catch (error) {
-        next(error);
-    }
+// Helper function to validate object IDs
+const isValidObjectId = (id) => {
+    return mongoose.Types.ObjectId.isValid(id);
 };
 
-// Get a single task
-exports.getTask = async (req, res, next) => {
-    try {
-        const task = await Task.findOne({
-            _id: req.params.id,
-            user: req.user._id
-        });
+// Helper function to validate and get category
+const validateCategory = async (categoryId, userId) => {
+    if (!categoryId) return null;
 
-        if (!task) {
-            return res.status(404).json({ message: 'Task not found' });
+    if (!isValidObjectId(categoryId)) {
+        throw new Error('Invalid category ID');
+    }
+
+    const category = await Category.findOne({
+        _id: categoryId,
+        user: userId
+    });
+
+    if (!category) {
+        throw new Error('Category not found or does not belong to user');
+    }
+
+    return categoryId;
+};
+
+// Helper function to validate and get tags
+const validateTags = async (tagIds, userId) => {
+    if (!tagIds || !Array.isArray(tagIds) || tagIds.length === 0) {
+        return [];
+    }
+
+    // Validate each tag ID
+    for (const tagId of tagIds) {
+        if (!isValidObjectId(tagId)) {
+            throw new Error('Invalid tag ID');
+        }
+    }
+
+    // Check if all tags belong to the user
+    const tags = await Tag.find({
+        _id: { $in: tagIds },
+        user: userId
+    });
+
+    if (tags.length !== tagIds.length) {
+        throw new Error('One or more tags not found or do not belong to user');
+    }
+
+    return tagIds;
+};
+
+// Get all tasks
+exports.getTasks = async (req, res) => {
+    try {
+        // Build filter object
+        const filter = { user: req.user.id };
+
+        // Filter by status if provided
+        if (req.query.status) {
+            filter.status = req.query.status;
         }
 
-        res.json(task);
+        // Filter by priority if provided
+        if (req.query.priority) {
+            filter.priority = req.query.priority;
+        }
+
+        // Filter by category if provided
+        if (req.query.category) {
+            if (req.query.category === 'null') {
+                filter.category = null;
+            } else if (isValidObjectId(req.query.category)) {
+                filter.category = req.query.category;
+            }
+        }
+
+        // Filter by tag if provided
+        if (req.query.tag && isValidObjectId(req.query.tag)) {
+            filter.tags = req.query.tag;
+        }
+
+        // Filter by due date
+        if (req.query.dueDate) {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+
+            if (req.query.dueDate === 'today') {
+                const tomorrow = new Date(today);
+                tomorrow.setDate(tomorrow.getDate() + 1);
+                filter.dueDate = { $gte: today, $lt: tomorrow };
+            } else if (req.query.dueDate === 'upcoming') {
+                const nextWeek = new Date(today);
+                nextWeek.setDate(nextWeek.getDate() + 7);
+                filter.dueDate = { $gte: today, $lt: nextWeek };
+            } else if (req.query.dueDate === 'overdue') {
+                filter.dueDate = { $lt: today };
+                filter.status = { $ne: 'completed' };
+            }
+        }
+
+        // Get tasks
+        const tasks = await Task.find(filter)
+            .populate('category', 'name color icon')
+            .populate('tags', 'name color')
+            .sort({ createdAt: -1 });
+
+        res.status(200).json({
+            success: true,
+            count: tasks.length,
+            data: tasks
+        });
     } catch (error) {
-        next(error);
+        console.error('Error getting tasks:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Server Error'
+        });
     }
 };
 
 // Create a new task
-exports.createTask = async (req, res, next) => {
+exports.createTask = async (req, res) => {
     try {
-        const newTask = new Task({
-            ...req.body,
-            user: req.user._id
-        });
+        const {
+            title,
+            description,
+            status,
+            priority,
+            dueDate,
+            category,
+            tags,
+            parent
+        } = req.body;
 
-        const savedTask = await newTask.save();
-        res.status(201).json(savedTask);
-    } catch (error) {
-        next(error);
-    }
-};
-
-// Update a task
-exports.updateTask = async (req, res, next) => {
-    try {
-        const task = await Task.findOneAndUpdate(
-            { _id: req.params.id, user: req.user._id },
-            req.body,
-            { new: true, runValidators: true }
-        );
-
-        if (!task) {
-            return res.status(404).json({ message: 'Task not found' });
-        }
-
-        res.json(task);
-    } catch (error) {
-        next(error);
-    }
-};
-
-// Delete a task
-exports.deleteTask = async (req, res, next) => {
-    try {
-        const task = await Task.findOneAndDelete({
-            _id: req.params.id,
-            user: req.user._id
-        });
-
-        if (!task) {
-            return res.status(404).json({ message: 'Task not found' });
-        }
-
-        res.json({ message: 'Task removed' });
-    } catch (error) {
-        next(error);
-    }
-};
-
-// Update task status
-exports.updateTaskStatus = async (req, res, next) => {
-    try {
-        const { status } = req.body;
-
-        if (!status) {
-            return res.status(400).json({ message: 'Status is required' });
-        }
-
-        const task = await Task.findOneAndUpdate(
-            { _id: req.params.id, user: req.user._id },
-            { status },
-            { new: true }
-        );
-
-        if (!task) {
-            return res.status(404).json({ message: 'Task not found' });
-        }
-
-        res.json(task);
-    } catch (error) {
-        next(error);
-    }
-};
-
-// Get subtasks
-exports.getSubtasks = async (req, res, next) => {
-    try {
-        const subtasks = await Task.find({
-            parent: req.params.id,
-            user: req.user._id
-        });
-
-        res.json(subtasks);
-    } catch (error) {
-        next(error);
-    }
-};
-
-// Create subtask
-exports.createSubtask = async (req, res, next) => {
-    try {
-        const newSubtask = new Task({
-            ...req.body,
-            user: req.user._id,
-            parent: req.params.id
-        });
-
-        const savedSubtask = await newSubtask.save();
-        res.status(201).json(savedSubtask);
-    } catch (error) {
-        next(error);
-    }
-};
-
-// Get a tree of tasks with their subtasks
-exports.getTasksWithSubtasks = async (req, res, next) => {
-    try {
-        // Get all parent tasks (tasks with no parent)
-        const parentTasks = await Task.find({
-            user: req.user._id,
-            parent: null
-        });
-
-        // For each parent task, fetch its subtasks
-        const tasksWithSubtasks = await Promise.all(
-            parentTasks.map(async (task) => {
-                const subtasks = await Task.find({
-                    user: req.user._id,
-                    parent: task._id
+        // Validate category if provided
+        let validatedCategoryId = null;
+        if (category) {
+            try {
+                validatedCategoryId = await validateCategory(category, req.user.id);
+            } catch (error) {
+                return res.status(400).json({
+                    success: false,
+                    error: error.message
                 });
+            }
+        }
 
-                return {
-                    ...task.toObject(),
-                    subtasks
-                };
-            })
-        );
+        // Validate tags if provided
+        let validatedTagIds = [];
+        if (tags) {
+            try {
+                validatedTagIds = await validateTags(tags, req.user.id);
+            } catch (error) {
+                return res.status(400).json({
+                    success: false,
+                    error: error.message
+                });
+            }
+        }
 
-        res.json(tasksWithSubtasks);
+        // Create task
+        const task = await Task.create({
+            title,
+            description,
+            status: status || 'todo',
+            priority: priority || 'medium',
+            dueDate: dueDate || null,
+            user: req.user.id,
+            category: validatedCategoryId,
+            tags: validatedTagIds,
+            parent: parent || null
+        });
+
+        // Populate category and tags for response
+        await task.populate('category', 'name color icon');
+        await task.populate('tags', 'name color');
+
+        res.status(201).json({
+            success: true,
+            data: task
+        });
     } catch (error) {
-        next(error);
+        console.error('Error creating task:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Server Error'
+        });
     }
 };
 
-// Update a subtask's parent
-exports.updateTaskParent = async (req, res, next) => {
+// Get single task
+exports.getTask = async (req, res) => {
     try {
-        const { parentId } = req.body;
-
-        // Validate if parent exists if parentId is provided
-        if (parentId) {
-            const parentTask = await Task.findOne({
-                _id: parentId,
-                user: req.user._id
+        const task = await Task.findOne({
+            _id: req.params.id,
+            user: req.user.id
+        })
+            .populate('category', 'name color icon')
+            .populate('tags', 'name color')
+            .populate({
+                path: 'subtasks',
+                select: 'title status priority dueDate'
             });
 
-            if (!parentTask) {
-                return res.status(404).json({ message: 'Parent task not found' });
-            }
-
-            // Prevent circular references
-            if (parentId === req.params.id) {
-                return res.status(400).json({ message: 'Task cannot be its own parent' });
-            }
-        }
-
-        const task = await Task.findOneAndUpdate(
-            { _id: req.params.id, user: req.user._id },
-            { parent: parentId || null },
-            { new: true }
-        );
-
         if (!task) {
-            return res.status(404).json({ message: 'Task not found' });
+            return res.status(404).json({
+                success: false,
+                error: 'Task not found'
+            });
         }
 
-        res.json(task);
+        res.status(200).json({
+            success: true,
+            data: task
+        });
     } catch (error) {
-        next(error);
+        console.error('Error getting task:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Server Error'
+        });
     }
 };
 
-// Delete a task and all its subtasks
-exports.deleteTaskWithSubtasks = async (req, res, next) => {
+// Update task
+exports.updateTask = async (req, res) => {
     try {
-        // Start a session for transaction
-        const session = await mongoose.startSession();
-        session.startTransaction();
+        const {
+            title,
+            description,
+            status,
+            priority,
+            dueDate,
+            category,
+            tags
+        } = req.body;
 
-        try {
-            // Find the task
-            const task = await Task.findOne({
-                _id: req.params.id,
-                user: req.user._id
-            }).session(session);
-
-            if (!task) {
-                await session.abortTransaction();
-                session.endSession();
-                return res.status(404).json({ message: 'Task not found' });
-            }
-
-            // Delete all subtasks recursively
-            await deleteSubtasksRecursive(req.params.id, req.user._id, session);
-
-            // Delete the task itself
-            await Task.findByIdAndDelete(req.params.id).session(session);
-
-            await session.commitTransaction();
-            session.endSession();
-
-            res.json({ message: 'Task and all subtasks removed' });
-        } catch (error) {
-            await session.abortTransaction();
-            session.endSession();
-            throw error;
-        }
-    } catch (error) {
-        next(error);
-    }
-};
-
-// Helper function to recursively delete subtasks
-async function deleteSubtasksRecursive(taskId, userId, session) {
-    // Find all direct subtasks
-    const subtasks = await Task.find({
-        parent: taskId,
-        user: userId
-    }).session(session);
-
-    // For each subtask, delete its subtasks recursively
-    for (const subtask of subtasks) {
-        await deleteSubtasksRecursive(subtask._id, userId, session);
-        await Task.findByIdAndDelete(subtask._id).session(session);
-    }
-}
-
-// Duplicate a task with optional subtasks
-exports.duplicateTask = async (req, res, next) => {
-    try {
-        const { withSubtasks = false } = req.body;
-
-        // Find the original task
-        const originalTask = await Task.findOne({
+        // Find task
+        let task = await Task.findOne({
             _id: req.params.id,
-            user: req.user._id
+            user: req.user.id
         });
 
-        if (!originalTask) {
-            return res.status(404).json({ message: 'Task not found' });
+        if (!task) {
+            return res.status(404).json({
+                success: false,
+                error: 'Task not found'
+            });
         }
 
-        // Create a new task with the same properties
-        const taskData = originalTask.toObject();
-        delete taskData._id;
-        delete taskData.createdAt;
-        delete taskData.updatedAt;
+        // Update basic fields if provided
+        if (title) task.title = title;
+        if (description !== undefined) task.description = description;
+        if (status) task.status = status;
+        if (priority) task.priority = priority;
+        if (dueDate !== undefined) task.dueDate = dueDate || null;
 
-        // Add "Copy of" to the title
-        taskData.title = `Copy of ${taskData.title}`;
-
-        const newTask = new Task(taskData);
-        await newTask.save();
-
-        // If withSubtasks is true, duplicate all subtasks
-        if (withSubtasks) {
-            await duplicateSubtasksRecursive(originalTask._id, newTask._id, req.user._id);
+        // Update completedAt based on status
+        if (status === 'completed' && task.status !== 'completed') {
+            task.completedAt = new Date();
+        } else if (status && status !== 'completed') {
+            task.completedAt = null;
         }
 
-        res.status(201).json(newTask);
+        // Validate and update category if provided
+        if (category !== undefined) {
+            try {
+                if (category === null || category === '') {
+                    task.category = null;
+                } else {
+                    task.category = await validateCategory(category, req.user.id);
+                }
+            } catch (error) {
+                return res.status(400).json({
+                    success: false,
+                    error: error.message
+                });
+            }
+        }
+
+        // Validate and update tags if provided
+        if (tags !== undefined) {
+            try {
+                task.tags = await validateTags(tags, req.user.id);
+            } catch (error) {
+                return res.status(400).json({
+                    success: false,
+                    error: error.message
+                });
+            }
+        }
+
+        // Save task
+        await task.save();
+
+        // Populate for response
+        await task.populate('category', 'name color icon');
+        await task.populate('tags', 'name color');
+
+        res.status(200).json({
+            success: true,
+            data: task
+        });
     } catch (error) {
-        next(error);
+        console.error('Error updating task:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Server Error'
+        });
     }
 };
 
-// Helper function to recursively duplicate subtasks
-async function duplicateSubtasksRecursive(originalParentId, newParentId, userId) {
-    // Find all direct subtasks of the original parent
-    const subtasks = await Task.find({
-        parent: originalParentId,
-        user: userId
-    });
+// Delete task
+exports.deleteTask = async (req, res) => {
+    try {
+        const task = await Task.findOne({
+            _id: req.params.id,
+            user: req.user.id
+        });
 
-    // Duplicate each subtask
-    for (const subtask of subtasks) {
-        const subtaskData = subtask.toObject();
-        delete subtaskData._id;
-        delete subtaskData.createdAt;
-        delete subtaskData.updatedAt;
+        if (!task) {
+            return res.status(404).json({
+                success: false,
+                error: 'Task not found'
+            });
+        }
 
-        // Set the new parent
-        subtaskData.parent = newParentId;
+        // Check if task has subtasks
+        const subtasks = await Task.find({ parent: req.params.id });
+        if (subtasks.length > 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Cannot delete task with subtasks. Please delete subtasks first.'
+            });
+        }
 
-        const newSubtask = new Task(subtaskData);
-        await newSubtask.save();
+        await task.deleteOne();
 
-        // Recursively duplicate this subtask's subtasks
-        await duplicateSubtasksRecursive(subtask._id, newSubtask._id, userId);
+        res.status(200).json({
+            success: true,
+            data: {}
+        });
+    } catch (error) {
+        console.error('Error deleting task:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Server Error'
+        });
     }
-}
+};
+
+// Add or remove tag from task
+exports.updateTaskTags = async (req, res) => {
+    try {
+        const { operation, tagId } = req.body;
+
+        if (!['add', 'remove'].includes(operation)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid operation. Use "add" or "remove"'
+            });
+        }
+
+        if (!isValidObjectId(tagId)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid tag ID'
+            });
+        }
+
+        // Verify tag belongs to user
+        const tag = await Tag.findOne({
+            _id: tagId,
+            user: req.user.id
+        });
+
+        if (!tag) {
+            return res.status(404).json({
+                success: false,
+                error: 'Tag not found or does not belong to user'
+            });
+        }
+
+        // Find task
+        const task = await Task.findOne({
+            _id: req.params.id,
+            user: req.user.id
+        });
+
+        if (!task) {
+            return res.status(404).json({
+                success: false,
+                error: 'Task not found'
+            });
+        }
+
+        // Add or remove tag
+        if (operation === 'add') {
+            // Check if tag already exists in task tags
+            if (!task.tags.includes(tagId)) {
+                task.tags.push(tagId);
+            }
+        } else {
+            // Remove tag from task tags
+            task.tags = task.tags.filter(id => id.toString() !== tagId);
+        }
+
+        await task.save();
+
+        // Populate for response
+        await task.populate('tags', 'name color');
+
+        res.status(200).json({
+            success: true,
+            data: task
+        });
+    } catch (error) {
+        console.error('Error updating task tags:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Server Error'
+        });
+    }
+};
