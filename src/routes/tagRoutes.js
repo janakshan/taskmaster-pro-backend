@@ -1,32 +1,44 @@
-// src/routes/tagRoutes.js
+// src/routes/taskRoutes.js
 const express = require('express');
 const router = express.Router();
 const { protect } = require('../middleware/authMiddleware');
 const {
-    getTags,
-    createTag,
-    getTag,
-    updateTag,
-    deleteTag,
-    getTagTasks
-} = require('../controllers/tagController');
+    getTasks,
+    createTask,
+    getTask,
+    updateTask,
+    deleteTask,
+    updateTaskTags,
+    forceDeleteTask
+} = require('../controllers/taskController');
 
-// Route: /api/tags
+// Import subtask routes
+const subtaskRoutes = require('./subtaskRoutes');
+
+// Route: /api/tasks
 router
     .route('/')
-    .get(protect, getTags)
-    .post(protect, createTag);
+    .get(protect, getTasks)
+    .post(protect, createTask);
 
-// Route: /api/tags/:id
+// Route: /api/tasks/:id
 router
     .route('/:id')
-    .get(protect, getTag)
-    .put(protect, updateTag)
-    .delete(protect, deleteTag);
+    .get(protect, getTask)
+    .put(protect, updateTask)
+    .delete(protect, deleteTask);
 
-// Route: /api/tags/:id/tasks
+// Route: /api/tasks/:id/force
 router
-    .route('/:id/tasks')
-    .get(protect, getTagTasks);
+    .route('/:id/force')
+    .delete(protect, forceDeleteTask);
+
+// Route: /api/tasks/:id/tags
+router
+    .route('/:id/tags')
+    .patch(protect, updateTaskTags);
+
+// Use subtask routes
+router.use('/:id/subtasks', subtaskRoutes);
 
 module.exports = router;
