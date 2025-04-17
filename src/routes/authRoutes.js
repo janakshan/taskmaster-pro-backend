@@ -5,6 +5,7 @@ const { protect } = require('../middleware/authMiddleware');
 const {
     registerUser,
     loginUser,
+    refreshToken,
     getMe,
     updateMe,
     changePassword
@@ -15,6 +16,9 @@ router.post('/register', registerUser);
 
 // Route: /api/auth/login
 router.post('/login', loginUser);
+
+// Route: /api/auth/refresh-token
+router.post('/refresh-token', refreshToken);
 
 // Route: /api/auth/me
 router

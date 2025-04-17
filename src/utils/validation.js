@@ -63,6 +63,25 @@ exports.validateLoginInput = (userData) => {
 };
 
 /**
+ * Validates refresh token input
+ * @param {Object} tokenData - Refresh token data
+ * @returns {Object} - { isValid, errors }
+ */
+exports.validateRefreshToken = (tokenData) => {
+    const errors = {};
+
+    // Check refresh token
+    if (!tokenData.refreshToken) {
+        errors.refreshToken = 'Refresh token is required';
+    }
+
+    return {
+        isValid: Object.keys(errors).length === 0,
+        errors
+    };
+};
+
+/**
  * Validates password change input
  * @param {Object} passwordData - Password change data
  * @returns {Object} - { isValid, errors }

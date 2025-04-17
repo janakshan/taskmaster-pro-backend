@@ -5,10 +5,23 @@ const bcrypt = require('bcryptjs');
 const createDefaultCategories = require('../utils/createDefaultCategories');
 const createDefaultTags = require('../utils/createDefaultTags');
 
-// Generate JWT Token
+// Generate JWT Access Token
 const generateToken = (id) => {
     return jwt.sign({ id }, process.env.JWT_SECRET, {
-        expiresIn: '30d'
+        expiresIn: '1d' // Short-lived access token (1 day)
+    });
+};
+
+// Generate JWT Refresh Token
+const generateRefreshToken = (id) => {
+    // Use REFRESH_TOKEN_SECRET if available, otherwise fall back to JWT_SECRET
+    const secret = process.env.REFRESH_TOKEN_SECRET || process.env.JWT_SECRET;
+    if (!secret) {
+        throw new Error('JWT secret not configured. Please check your environment variables.');
+    }
+
+    return jwt.sign({ id }, secret, {
+        expiresIn: '30d' // Longer-lived refresh token (30 days)
     });
 };
 
@@ -44,13 +57,18 @@ exports.registerUser = async (req, res) => {
             await createDefaultCategories(user._id);
             await createDefaultTags(user._id);
 
+            // Generate tokens
+            const token = generateToken(user._id);
+            const refreshToken = generateRefreshToken(user._id);
+
             res.status(201).json({
                 success: true,
                 data: {
                     _id: user._id,
                     name: user.name,
                     email: user.email,
-                    token: generateToken(user._id)
+                    token: token,
+                    refreshToken: refreshToken
                 }
             });
         } else {
@@ -97,17 +115,81 @@ exports.loginUser = async (req, res) => {
         user.lastActive = Date.now();
         await user.save();
 
+        // Generate tokens
+        const token = generateToken(user._id);
+        const refreshToken = generateRefreshToken(user._id);
+
         res.status(200).json({
             success: true,
             data: {
                 _id: user._id,
                 name: user.name,
                 email: user.email,
-                token: generateToken(user._id)
+                token: token,
+                refreshToken: refreshToken
             }
         });
     } catch (error) {
         console.error('Error logging in user:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Server Error'
+        });
+    }
+};
+
+// @desc    Refresh access token
+// @route   POST /api/auth/refresh-token
+// @access  Public
+exports.refreshToken = async (req, res) => {
+    try {
+        const { refreshToken } = req.body;
+
+        if (!refreshToken) {
+            return res.status(400).json({
+                success: false,
+                error: 'Refresh token is required'
+            });
+        }
+
+        // Verify refresh token using REFRESH_TOKEN_SECRET or falling back to JWT_SECRET
+        const secret = process.env.REFRESH_TOKEN_SECRET || process.env.JWT_SECRET;
+        if (!secret) {
+            throw new Error('JWT secret not configured. Please check your environment variables.');
+        }
+
+        const decoded = jwt.verify(refreshToken, secret);
+
+        // Check if user exists
+        const user = await User.findById(decoded.id);
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                error: 'User not found'
+            });
+        }
+
+        // Generate new tokens
+        const newToken = generateToken(user._id);
+        const newRefreshToken = generateRefreshToken(user._id);
+
+        res.status(200).json({
+            success: true,
+            data: {
+                token: newToken,
+                refreshToken: newRefreshToken
+            }
+        });
+    } catch (error) {
+        console.error('Error refreshing token:', error);
+
+        if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
+            return res.status(401).json({
+                success: false,
+                error: 'Invalid or expired refresh token'
+            });
+        }
+
         res.status(500).json({
             success: false,
             error: 'Server Error'
