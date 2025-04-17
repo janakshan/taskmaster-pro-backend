@@ -55,6 +55,45 @@ const validateTags = async (tagIds, userId) => {
     return tagIds;
 };
 
+// Helper function to check for circular references
+const checkForCircularReference = async (childId, potentialParentId) => {
+    // If we're trying to set a parent to itself
+    if (childId.toString() === potentialParentId.toString()) {
+        return true;
+    }
+
+    // Check if the potential parent is a descendant of the child
+    // This prevents creating loops in the task hierarchy
+    let currentId = potentialParentId;
+    const visitedIds = new Set();
+
+    while (currentId) {
+        // If we've already visited this ID, there's a loop
+        if (visitedIds.has(currentId.toString())) {
+            return true;
+        }
+
+        visitedIds.add(currentId.toString());
+
+        // Find the parent of the current task
+        const currentTask = await Task.findById(currentId).select('parent');
+        if (!currentTask || !currentTask.parent) {
+            // No parent or task not found, so no circular reference
+            break;
+        }
+
+        // If the parent is the child we're checking, there's a circular reference
+        if (currentTask.parent.toString() === childId.toString()) {
+            return true;
+        }
+
+        // Move up to the next parent
+        currentId = currentTask.parent;
+    }
+
+    return false;
+};
+
 // Get all tasks
 exports.getTasks = async (req, res) => {
     try {
@@ -104,16 +143,55 @@ exports.getTasks = async (req, res) => {
             }
         }
 
+        // Filter by parent task or top-level tasks
+        if (req.query.parent) {
+            if (req.query.parent === 'null') {
+                // Get only top-level tasks (no parent)
+                filter.parent = null;
+            } else if (isValidObjectId(req.query.parent)) {
+                // Get subtasks of specific parent
+                filter.parent = req.query.parent;
+            }
+        }
+
         // Get tasks
         const tasks = await Task.find(filter)
             .populate('category', 'name color icon')
             .populate('tags', 'name color')
             .sort({ createdAt: -1 });
 
+        // Calculate subtask progress for each task
+        const tasksWithProgress = await Promise.all(tasks.map(async (task) => {
+            const taskObj = task.toObject();
+
+            // Count subtasks
+            const totalSubtasks = await Task.countDocuments({
+                parent: task._id,
+                user: req.user.id
+            });
+
+            if (totalSubtasks > 0) {
+                // Count completed subtasks
+                const completedSubtasks = await Task.countDocuments({
+                    parent: task._id,
+                    user: req.user.id,
+                    status: 'completed'
+                });
+
+                taskObj.subtaskCount = totalSubtasks;
+                taskObj.subtaskProgress = Math.round((completedSubtasks / totalSubtasks) * 100);
+            } else {
+                taskObj.subtaskCount = 0;
+                taskObj.subtaskProgress = 0;
+            }
+
+            return taskObj;
+        }));
+
         res.status(200).json({
             success: true,
-            count: tasks.length,
-            data: tasks
+            count: tasksWithProgress.length,
+            data: tasksWithProgress
         });
     } catch (error) {
         console.error('Error getting tasks:', error);
@@ -164,6 +242,32 @@ exports.createTask = async (req, res) => {
             }
         }
 
+        // Validate parent if provided
+        let validatedParentId = null;
+        if (parent) {
+            if (!isValidObjectId(parent)) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Invalid parent task ID'
+                });
+            }
+
+            // Check if parent task exists and belongs to the user
+            const parentTask = await Task.findOne({
+                _id: parent,
+                user: req.user.id
+            });
+
+            if (!parentTask) {
+                return res.status(404).json({
+                    success: false,
+                    error: 'Parent task not found or does not belong to you'
+                });
+            }
+
+            validatedParentId = parent;
+        }
+
         // Create task
         const task = await Task.create({
             title,
@@ -174,7 +278,7 @@ exports.createTask = async (req, res) => {
             user: req.user.id,
             category: validatedCategoryId,
             tags: validatedTagIds,
-            parent: parent || null
+            parent: validatedParentId
         });
 
         // Populate category and tags for response
@@ -205,7 +309,8 @@ exports.getTask = async (req, res) => {
             .populate('tags', 'name color')
             .populate({
                 path: 'subtasks',
-                select: 'title status priority dueDate'
+                select: 'title status priority dueDate completedAt',
+                options: { sort: { createdAt: 1 } }
             });
 
         if (!task) {
@@ -215,9 +320,25 @@ exports.getTask = async (req, res) => {
             });
         }
 
+        // Calculate subtask progress
+        let subtaskProgress = 0;
+        if (task.subtasks && task.subtasks.length > 0) {
+            const completedSubtasks = task.subtasks.filter(
+                subtask => subtask.status === 'completed'
+            ).length;
+
+            subtaskProgress = Math.round((completedSubtasks / task.subtasks.length) * 100);
+        }
+
+        // Add subtask progress to response
+        const taskWithProgress = {
+            ...task.toObject(),
+            subtaskProgress
+        };
+
         res.status(200).json({
             success: true,
-            data: task
+            data: taskWithProgress
         });
     } catch (error) {
         console.error('Error getting task:', error);
@@ -238,7 +359,8 @@ exports.updateTask = async (req, res) => {
             priority,
             dueDate,
             category,
-            tags
+            tags,
+            parent
         } = req.body;
 
         // Find task
@@ -296,16 +418,85 @@ exports.updateTask = async (req, res) => {
             }
         }
 
+        // Handle parent updates
+        if (parent !== undefined) {
+            // Removing parent (making it a top-level task)
+            if (parent === null || parent === '') {
+                task.parent = null;
+            }
+            // Setting a parent
+            else {
+                if (!isValidObjectId(parent)) {
+                    return res.status(400).json({
+                        success: false,
+                        error: 'Invalid parent task ID'
+                    });
+                }
+
+                // Don't update if parent is unchanged
+                if (!task.parent || task.parent.toString() !== parent) {
+                    // Check if parent task exists and belongs to the user
+                    const parentTask = await Task.findOne({
+                        _id: parent,
+                        user: req.user.id
+                    });
+
+                    if (!parentTask) {
+                        return res.status(404).json({
+                            success: false,
+                            error: 'Parent task not found or does not belong to you'
+                        });
+                    }
+
+                    // Check for circular references
+                    const hasCircularRef = await checkForCircularReference(
+                        task._id,
+                        parent
+                    );
+
+                    if (hasCircularRef) {
+                        return res.status(400).json({
+                            success: false,
+                            error: 'Cannot create circular reference in task hierarchy'
+                        });
+                    }
+
+                    task.parent = parent;
+                }
+            }
+        }
+
         // Save task
         await task.save();
 
         // Populate for response
         await task.populate('category', 'name color icon');
         await task.populate('tags', 'name color');
+        await task.populate({
+            path: 'subtasks',
+            select: 'title status priority dueDate completedAt',
+            options: { sort: { createdAt: 1 } }
+        });
+
+        // Calculate subtask progress
+        let subtaskProgress = 0;
+        if (task.subtasks && task.subtasks.length > 0) {
+            const completedSubtasks = task.subtasks.filter(
+                subtask => subtask.status === 'completed'
+            ).length;
+
+            subtaskProgress = Math.round((completedSubtasks / task.subtasks.length) * 100);
+        }
+
+        // Add subtask progress to response
+        const taskWithProgress = {
+            ...task.toObject(),
+            subtaskProgress
+        };
 
         res.status(200).json({
             success: true,
-            data: task
+            data: taskWithProgress
         });
     } catch (error) {
         console.error('Error updating task:', error);
@@ -319,35 +510,106 @@ exports.updateTask = async (req, res) => {
 // Delete task
 exports.deleteTask = async (req, res) => {
     try {
-        const task = await Task.findOne({
-            _id: req.params.id,
-            user: req.user.id
-        });
+        const session = await mongoose.startSession();
+        session.startTransaction();
 
-        if (!task) {
-            return res.status(404).json({
-                success: false,
-                error: 'Task not found'
+        try {
+            const task = await Task.findOne({
+                _id: req.params.id,
+                user: req.user.id
+            }).session(session);
+
+            if (!task) {
+                await session.abortTransaction();
+                session.endSession();
+                return res.status(404).json({
+                    success: false,
+                    error: 'Task not found'
+                });
+            }
+
+            // Check if task has subtasks
+            const subtasksCount = await Task.countDocuments({
+                parent: req.params.id
+            }).session(session);
+
+            if (subtasksCount > 0) {
+                await session.abortTransaction();
+                session.endSession();
+                return res.status(400).json({
+                    success: false,
+                    error: 'Cannot delete task with subtasks. Please delete subtasks first or use force delete.'
+                });
+            }
+
+            await task.deleteOne({ session });
+
+            await session.commitTransaction();
+            session.endSession();
+
+            res.status(200).json({
+                success: true,
+                data: {}
             });
+        } catch (error) {
+            await session.abortTransaction();
+            session.endSession();
+            throw error;
         }
-
-        // Check if task has subtasks
-        const subtasks = await Task.find({ parent: req.params.id });
-        if (subtasks.length > 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'Cannot delete task with subtasks. Please delete subtasks first.'
-            });
-        }
-
-        await task.deleteOne();
-
-        res.status(200).json({
-            success: true,
-            data: {}
-        });
     } catch (error) {
         console.error('Error deleting task:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Server Error'
+        });
+    }
+};
+
+// Force delete task and all its subtasks
+exports.forceDeleteTask = async (req, res) => {
+    try {
+        const session = await mongoose.startSession();
+        session.startTransaction();
+
+        try {
+            const task = await Task.findOne({
+                _id: req.params.id,
+                user: req.user.id
+            }).session(session);
+
+            if (!task) {
+                await session.abortTransaction();
+                session.endSession();
+                return res.status(404).json({
+                    success: false,
+                    error: 'Task not found'
+                });
+            }
+
+            // Delete all subtasks recursively (this is a simplified approach)
+            // In a production environment, you might want to handle deeper nesting
+            await Task.deleteMany({
+                parent: req.params.id,
+                user: req.user.id
+            }).session(session);
+
+            // Delete the task itself
+            await task.deleteOne({ session });
+
+            await session.commitTransaction();
+            session.endSession();
+
+            res.status(200).json({
+                success: true,
+                data: {}
+            });
+        } catch (error) {
+            await session.abortTransaction();
+            session.endSession();
+            throw error;
+        }
+    } catch (error) {
+        console.error('Error force deleting task:', error);
         res.status(500).json({
             success: false,
             error: 'Server Error'

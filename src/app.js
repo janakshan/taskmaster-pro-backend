@@ -3,12 +3,17 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const dotenv = require('dotenv');
+
+// Load environment variables
+dotenv.config();
 
 // Import routes
 const authRoutes = require('./routes/authRoutes');
 const taskRoutes = require('./routes/taskRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
 const tagRoutes = require('./routes/tagRoutes');
+// Note: subtaskRoutes are imported within taskRoutes
 
 // Create express app
 const app = express();
