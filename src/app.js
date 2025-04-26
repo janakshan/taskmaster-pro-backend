@@ -13,6 +13,8 @@ const authRoutes = require('./routes/authRoutes');
 const taskRoutes = require('./routes/taskRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
 const tagRoutes = require('./routes/tagRoutes');
+const projectRoutes = require('./routes/projectRoutes');
+const teamRoutes = require('./routes/teamRoutes');
 // Note: subtaskRoutes are imported within taskRoutes
 
 // Create express app
@@ -29,6 +31,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/tags', tagRoutes);
+app.use('/api/projects', projectRoutes);
+app.use('/api/teams', teamRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
