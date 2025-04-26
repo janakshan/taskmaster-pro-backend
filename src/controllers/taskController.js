@@ -1,209 +1,115 @@
 // src/controllers/taskController.js
 const Task = require('../models/Task');
-const Category = require('../models/Category');
-const Tag = require('../models/Tag');
-const mongoose = require('mongoose');
+const Project = require('../models/Project');
+const ApiError = require('../utils/ApiError');
 
-// Helper function to validate object IDs
-const isValidObjectId = (id) => {
-    return mongoose.Types.ObjectId.isValid(id);
-};
-
-// Helper function to validate and get category
-const validateCategory = async (categoryId, userId) => {
-    if (!categoryId) return null;
-
-    if (!isValidObjectId(categoryId)) {
-        throw new Error('Invalid category ID');
-    }
-
-    const category = await Category.findOne({
-        _id: categoryId,
-        user: userId
-    });
-
-    if (!category) {
-        throw new Error('Category not found or does not belong to user');
-    }
-
-    return categoryId;
-};
-
-// Helper function to validate and get tags
-const validateTags = async (tagIds, userId) => {
-    if (!tagIds || !Array.isArray(tagIds) || tagIds.length === 0) {
-        return [];
-    }
-
-    // Validate each tag ID
-    for (const tagId of tagIds) {
-        if (!isValidObjectId(tagId)) {
-            throw new Error('Invalid tag ID');
-        }
-    }
-
-    // Check if all tags belong to the user
-    const tags = await Tag.find({
-        _id: { $in: tagIds },
-        user: userId
-    });
-
-    if (tags.length !== tagIds.length) {
-        throw new Error('One or more tags not found or do not belong to user');
-    }
-
-    return tagIds;
-};
-
-// Helper function to check for circular references
-const checkForCircularReference = async (childId, potentialParentId) => {
-    // If we're trying to set a parent to itself
-    if (childId.toString() === potentialParentId.toString()) {
-        return true;
-    }
-
-    // Check if the potential parent is a descendant of the child
-    // This prevents creating loops in the task hierarchy
-    let currentId = potentialParentId;
-    const visitedIds = new Set();
-
-    while (currentId) {
-        // If we've already visited this ID, there's a loop
-        if (visitedIds.has(currentId.toString())) {
-            return true;
-        }
-
-        visitedIds.add(currentId.toString());
-
-        // Find the parent of the current task
-        const currentTask = await Task.findById(currentId).select('parent');
-        if (!currentTask || !currentTask.parent) {
-            // No parent or task not found, so no circular reference
-            break;
-        }
-
-        // If the parent is the child we're checking, there's a circular reference
-        if (currentTask.parent.toString() === childId.toString()) {
-            return true;
-        }
-
-        // Move up to the next parent
-        currentId = currentTask.parent;
-    }
-
-    return false;
-};
-
-// Get all tasks
-exports.getTasks = async (req, res) => {
+/**
+ * @desc    Get all tasks for the authenticated user
+ * @route   GET /api/tasks
+ * @access  Private
+ */
+exports.getTasks = async (req, res, next) => {
     try {
-        // Build filter object
-        const filter = { user: req.user.id };
+        // Build query
+        const queryObj = {
+            $or: [
+                { user: req.user._id },
+                { 'assignees.user': req.user._id }
+            ]
+        };
 
-        // Filter by status if provided
+        // Handle filters
         if (req.query.status) {
-            filter.status = req.query.status;
+            queryObj.status = req.query.status;
         }
 
-        // Filter by priority if provided
         if (req.query.priority) {
-            filter.priority = req.query.priority;
+            queryObj.priority = req.query.priority;
         }
 
-        // Filter by category if provided
         if (req.query.category) {
-            if (req.query.category === 'null') {
-                filter.category = null;
-            } else if (isValidObjectId(req.query.category)) {
-                filter.category = req.query.category;
-            }
+            queryObj.category = req.query.category;
         }
 
-        // Filter by tag if provided
-        if (req.query.tag && isValidObjectId(req.query.tag)) {
-            filter.tags = req.query.tag;
+        if (req.query.project) {
+            queryObj.project = req.query.project;
         }
 
-        // Filter by due date
         if (req.query.dueDate) {
+            // Handle due date filtering
             const today = new Date();
             today.setHours(0, 0, 0, 0);
 
             if (req.query.dueDate === 'today') {
                 const tomorrow = new Date(today);
                 tomorrow.setDate(tomorrow.getDate() + 1);
-                filter.dueDate = { $gte: today, $lt: tomorrow };
+
+                queryObj.dueDate = {
+                    $gte: today,
+                    $lt: tomorrow
+                };
             } else if (req.query.dueDate === 'upcoming') {
                 const nextWeek = new Date(today);
                 nextWeek.setDate(nextWeek.getDate() + 7);
-                filter.dueDate = { $gte: today, $lt: nextWeek };
+
+                queryObj.dueDate = {
+                    $gte: today,
+                    $lt: nextWeek
+                };
             } else if (req.query.dueDate === 'overdue') {
-                filter.dueDate = { $lt: today };
-                filter.status = { $ne: 'completed' };
+                queryObj.dueDate = { $lt: today };
+                queryObj.status = { $ne: 'completed' };
             }
         }
 
-        // Filter by parent task or top-level tasks
-        if (req.query.parent) {
-            if (req.query.parent === 'null') {
-                // Get only top-level tasks (no parent)
-                filter.parent = null;
-            } else if (isValidObjectId(req.query.parent)) {
-                // Get subtasks of specific parent
-                filter.parent = req.query.parent;
-            }
+        // Search term
+        if (req.query.search) {
+            queryObj.$or = [
+                { title: { $regex: req.query.search, $options: 'i' } },
+                { description: { $regex: req.query.search, $options: 'i' } },
+            ];
         }
 
-        // Get tasks
-        const tasks = await Task.find(filter)
+        // Pagination
+        const page = parseInt(req.query.page, 10) || 1;
+        const limit = parseInt(req.query.limit, 10) || 20;
+        const skip = (page - 1) * limit;
+
+        // Execute query with pagination
+        const tasks = await Task.find(queryObj)
             .populate('category', 'name color icon')
             .populate('tags', 'name color')
-            .sort({ createdAt: -1 });
+            .populate('project', 'name color icon')
+            .populate('assignees.user', 'name avatar')
+            .sort({ updatedAt: -1 })
+            .skip(skip)
+            .limit(limit);
 
-        // Calculate subtask progress for each task
-        const tasksWithProgress = await Promise.all(tasks.map(async (task) => {
-            const taskObj = task.toObject();
-
-            // Count subtasks
-            const totalSubtasks = await Task.countDocuments({
-                parent: task._id,
-                user: req.user.id
-            });
-
-            if (totalSubtasks > 0) {
-                // Count completed subtasks
-                const completedSubtasks = await Task.countDocuments({
-                    parent: task._id,
-                    user: req.user.id,
-                    status: 'completed'
-                });
-
-                taskObj.subtaskCount = totalSubtasks;
-                taskObj.subtaskProgress = Math.round((completedSubtasks / totalSubtasks) * 100);
-            } else {
-                taskObj.subtaskCount = 0;
-                taskObj.subtaskProgress = 0;
-            }
-
-            return taskObj;
-        }));
+        // Get total count for pagination
+        const total = await Task.countDocuments(queryObj);
 
         res.status(200).json({
             success: true,
-            count: tasksWithProgress.length,
-            data: tasksWithProgress
+            count: tasks.length,
+            pagination: {
+                page,
+                limit,
+                total,
+                pages: Math.ceil(total / limit)
+            },
+            data: tasks
         });
     } catch (error) {
-        console.error('Error getting tasks:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Server Error'
-        });
+        next(error);
     }
 };
 
-// Create a new task
-exports.createTask = async (req, res) => {
+/**
+ * @desc    Create a new task
+ * @route   POST /api/tasks
+ * @access  Private
+ */
+exports.createTask = async (req, res, next) => {
     try {
         const {
             title,
@@ -213,59 +119,23 @@ exports.createTask = async (req, res) => {
             dueDate,
             category,
             tags,
-            parent
+            project,
+            parent,
+            assignees,
+            estimatedTime
         } = req.body;
 
-        // Validate category if provided
-        let validatedCategoryId = null;
-        if (category) {
-            try {
-                validatedCategoryId = await validateCategory(category, req.user.id);
-            } catch (error) {
-                return res.status(400).json({
-                    success: false,
-                    error: error.message
-                });
-            }
-        }
+        // Check if project exists and user is a member
+        if (project) {
+            const projectDoc = await Project.findById(project);
 
-        // Validate tags if provided
-        let validatedTagIds = [];
-        if (tags) {
-            try {
-                validatedTagIds = await validateTags(tags, req.user.id);
-            } catch (error) {
-                return res.status(400).json({
-                    success: false,
-                    error: error.message
-                });
-            }
-        }
-
-        // Validate parent if provided
-        let validatedParentId = null;
-        if (parent) {
-            if (!isValidObjectId(parent)) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Invalid parent task ID'
-                });
+            if (!projectDoc) {
+                return next(new ApiError('Project not found', 404));
             }
 
-            // Check if parent task exists and belongs to the user
-            const parentTask = await Task.findOne({
-                _id: parent,
-                user: req.user.id
-            });
-
-            if (!parentTask) {
-                return res.status(404).json({
-                    success: false,
-                    error: 'Parent task not found or does not belong to you'
-                });
+            if (!projectDoc.isMember(req.user._id)) {
+                return next(new ApiError('You are not a member of this project', 403));
             }
-
-            validatedParentId = parent;
         }
 
         // Create task
@@ -274,83 +144,84 @@ exports.createTask = async (req, res) => {
             description,
             status: status || 'todo',
             priority: priority || 'medium',
-            dueDate: dueDate || null,
-            user: req.user.id,
-            category: validatedCategoryId,
-            tags: validatedTagIds,
-            parent: validatedParentId
+            dueDate,
+            category,
+            tags,
+            project,
+            parent,
+            user: req.user._id,
+            assignees: assignees || [{ user: req.user._id, role: 'responsible' }],
+            estimatedTime
         });
 
-        // Populate category and tags for response
-        await task.populate('category', 'name color icon');
-        await task.populate('tags', 'name color');
+        // Populate references for response
+        await task.populate([
+            { path: 'category', select: 'name color icon' },
+            { path: 'tags', select: 'name color' },
+            { path: 'project', select: 'name color icon' },
+            { path: 'assignees.user', select: 'name avatar' }
+        ]);
 
         res.status(201).json({
             success: true,
             data: task
         });
     } catch (error) {
-        console.error('Error creating task:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Server Error'
-        });
+        next(error);
     }
 };
 
-// Get single task
-exports.getTask = async (req, res) => {
+/**
+ * @desc    Get a single task
+ * @route   GET /api/tasks/:id
+ * @access  Private
+ */
+exports.getTask = async (req, res, next) => {
     try {
-        const task = await Task.findOne({
-            _id: req.params.id,
-            user: req.user.id
-        })
+        const task = await Task.findById(req.params.id)
             .populate('category', 'name color icon')
             .populate('tags', 'name color')
+            .populate('project', 'name color icon')
+            .populate('assignees.user', 'name avatar email')
             .populate({
-                path: 'subtasks',
-                select: 'title status priority dueDate completedAt',
-                options: { sort: { createdAt: 1 } }
+                path: 'parent',
+                select: 'title status'
             });
 
         if (!task) {
-            return res.status(404).json({
-                success: false,
-                error: 'Task not found'
-            });
+            return next(new ApiError('Task not found', 404));
         }
 
-        // Calculate subtask progress
-        let subtaskProgress = 0;
-        if (task.subtasks && task.subtasks.length > 0) {
-            const completedSubtasks = task.subtasks.filter(
-                subtask => subtask.status === 'completed'
-            ).length;
+        // Check if user is the task owner or an assignee
+        const isOwnerOrAssignee =
+            task.user.toString() === req.user._id.toString() ||
+            task.assignees.some(assignee => assignee.user._id.toString() === req.user._id.toString());
 
-            subtaskProgress = Math.round((completedSubtasks / task.subtasks.length) * 100);
+        // If not owner or assignee, check if it's a project task and user is project member
+        if (!isOwnerOrAssignee && task.project) {
+            const project = await Project.findById(task.project);
+            if (!project || !project.isMember(req.user._id)) {
+                return next(new ApiError('Not authorized to access this task', 403));
+            }
+        } else if (!isOwnerOrAssignee) {
+            return next(new ApiError('Not authorized to access this task', 403));
         }
-
-        // Add subtask progress to response
-        const taskWithProgress = {
-            ...task.toObject(),
-            subtaskProgress
-        };
 
         res.status(200).json({
             success: true,
-            data: taskWithProgress
+            data: task
         });
     } catch (error) {
-        console.error('Error getting task:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Server Error'
-        });
+        next(error);
     }
 };
 
-// Update task
-exports.updateTask = async (req, res) => {
+/**
+ * @desc    Update a task
+ * @route   PUT /api/tasks/:id
+ * @access  Private
+ */
+exports.updateTask = async (req, res, next) => {
     try {
         const {
             title,
@@ -360,333 +231,294 @@ exports.updateTask = async (req, res) => {
             dueDate,
             category,
             tags,
-            parent
+            project,
+            parent,
+            assignees,
+            estimatedTime,
+            actualTime
         } = req.body;
 
-        // Find task
-        let task = await Task.findOne({
-            _id: req.params.id,
-            user: req.user.id
-        });
+        let task = await Task.findById(req.params.id);
 
         if (!task) {
-            return res.status(404).json({
-                success: false,
-                error: 'Task not found'
-            });
+            return next(new ApiError('Task not found', 404));
         }
 
-        // Update basic fields if provided
-        if (title) task.title = title;
-        if (description !== undefined) task.description = description;
-        if (status) task.status = status;
-        if (priority) task.priority = priority;
-        if (dueDate !== undefined) task.dueDate = dueDate || null;
+        // Check if user is authorized to update this task
+        const isOwnerOrAssignee =
+            task.user.toString() === req.user._id.toString() ||
+            task.assignees.some(assignee =>
+                assignee.user.toString() === req.user._id.toString() &&
+                assignee.role === 'responsible'
+            );
 
-        // Update completedAt based on status
+        // If not owner or responsible assignee, check if it's a project task and user is project manager
+        let hasProjectManagerAccess = false;
+
+        if (!isOwnerOrAssignee && task.project) {
+            const project = await Project.findById(task.project);
+            if (project && project.isManagerOrOwner(req.user._id)) {
+                hasProjectManagerAccess = true;
+            }
+        }
+
+        if (!isOwnerOrAssignee && !hasProjectManagerAccess) {
+            return next(new ApiError('Not authorized to update this task', 403));
+        }
+
+        // Check if changing project and if user has access to the new project
+        if (project && project !== task.project) {
+            const projectDoc = await Project.findById(project);
+
+            if (!projectDoc) {
+                return next(new ApiError('Project not found', 404));
+            }
+
+            if (!projectDoc.isMember(req.user._id)) {
+                return next(new ApiError('You are not a member of the selected project', 403));
+            }
+        }
+
+        // Handle completion status
+        let completedAt = task.completedAt;
         if (status === 'completed' && task.status !== 'completed') {
-            task.completedAt = new Date();
-        } else if (status && status !== 'completed') {
-            task.completedAt = null;
+            completedAt = new Date();
+        } else if (status !== 'completed' && task.status === 'completed') {
+            completedAt = null;
         }
 
-        // Validate and update category if provided
-        if (category !== undefined) {
-            try {
-                if (category === null || category === '') {
-                    task.category = null;
-                } else {
-                    task.category = await validateCategory(category, req.user.id);
-                }
-            } catch (error) {
-                return res.status(400).json({
-                    success: false,
-                    error: error.message
-                });
-            }
-        }
+        // Update task
+        task = await Task.findByIdAndUpdate(
+            req.params.id,
+            {
+                title,
+                description,
+                status,
+                priority,
+                dueDate,
+                category,
+                tags,
+                project,
+                parent,
+                assignees,
+                estimatedTime,
+                actualTime,
+                completedAt
+            },
+            { new: true, runValidators: true }
+        );
 
-        // Validate and update tags if provided
-        if (tags !== undefined) {
-            try {
-                task.tags = await validateTags(tags, req.user.id);
-            } catch (error) {
-                return res.status(400).json({
-                    success: false,
-                    error: error.message
-                });
-            }
-        }
-
-        // Handle parent updates
-        if (parent !== undefined) {
-            // Removing parent (making it a top-level task)
-            if (parent === null || parent === '') {
-                task.parent = null;
-            }
-            // Setting a parent
-            else {
-                if (!isValidObjectId(parent)) {
-                    return res.status(400).json({
-                        success: false,
-                        error: 'Invalid parent task ID'
-                    });
-                }
-
-                // Don't update if parent is unchanged
-                if (!task.parent || task.parent.toString() !== parent) {
-                    // Check if parent task exists and belongs to the user
-                    const parentTask = await Task.findOne({
-                        _id: parent,
-                        user: req.user.id
-                    });
-
-                    if (!parentTask) {
-                        return res.status(404).json({
-                            success: false,
-                            error: 'Parent task not found or does not belong to you'
-                        });
-                    }
-
-                    // Check for circular references
-                    const hasCircularRef = await checkForCircularReference(
-                        task._id,
-                        parent
-                    );
-
-                    if (hasCircularRef) {
-                        return res.status(400).json({
-                            success: false,
-                            error: 'Cannot create circular reference in task hierarchy'
-                        });
-                    }
-
-                    task.parent = parent;
-                }
-            }
-        }
-
-        // Save task
-        await task.save();
-
-        // Populate for response
-        await task.populate('category', 'name color icon');
-        await task.populate('tags', 'name color');
-        await task.populate({
-            path: 'subtasks',
-            select: 'title status priority dueDate completedAt',
-            options: { sort: { createdAt: 1 } }
-        });
-
-        // Calculate subtask progress
-        let subtaskProgress = 0;
-        if (task.subtasks && task.subtasks.length > 0) {
-            const completedSubtasks = task.subtasks.filter(
-                subtask => subtask.status === 'completed'
-            ).length;
-
-            subtaskProgress = Math.round((completedSubtasks / task.subtasks.length) * 100);
-        }
-
-        // Add subtask progress to response
-        const taskWithProgress = {
-            ...task.toObject(),
-            subtaskProgress
-        };
-
-        res.status(200).json({
-            success: true,
-            data: taskWithProgress
-        });
-    } catch (error) {
-        console.error('Error updating task:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Server Error'
-        });
-    }
-};
-
-// Delete task
-exports.deleteTask = async (req, res) => {
-    try {
-        const session = await mongoose.startSession();
-        session.startTransaction();
-
-        try {
-            const task = await Task.findOne({
-                _id: req.params.id,
-                user: req.user.id
-            }).session(session);
-
-            if (!task) {
-                await session.abortTransaction();
-                session.endSession();
-                return res.status(404).json({
-                    success: false,
-                    error: 'Task not found'
-                });
-            }
-
-            // Check if task has subtasks
-            const subtasksCount = await Task.countDocuments({
-                parent: req.params.id
-            }).session(session);
-
-            if (subtasksCount > 0) {
-                await session.abortTransaction();
-                session.endSession();
-                return res.status(400).json({
-                    success: false,
-                    error: 'Cannot delete task with subtasks. Please delete subtasks first or use force delete.'
-                });
-            }
-
-            await task.deleteOne({ session });
-
-            await session.commitTransaction();
-            session.endSession();
-
-            res.status(200).json({
-                success: true,
-                data: {}
-            });
-        } catch (error) {
-            await session.abortTransaction();
-            session.endSession();
-            throw error;
-        }
-    } catch (error) {
-        console.error('Error deleting task:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Server Error'
-        });
-    }
-};
-
-// Force delete task and all its subtasks
-exports.forceDeleteTask = async (req, res) => {
-    try {
-        const session = await mongoose.startSession();
-        session.startTransaction();
-
-        try {
-            const task = await Task.findOne({
-                _id: req.params.id,
-                user: req.user.id
-            }).session(session);
-
-            if (!task) {
-                await session.abortTransaction();
-                session.endSession();
-                return res.status(404).json({
-                    success: false,
-                    error: 'Task not found'
-                });
-            }
-
-            // Delete all subtasks recursively (this is a simplified approach)
-            // In a production environment, you might want to handle deeper nesting
-            await Task.deleteMany({
-                parent: req.params.id,
-                user: req.user.id
-            }).session(session);
-
-            // Delete the task itself
-            await task.deleteOne({ session });
-
-            await session.commitTransaction();
-            session.endSession();
-
-            res.status(200).json({
-                success: true,
-                data: {}
-            });
-        } catch (error) {
-            await session.abortTransaction();
-            session.endSession();
-            throw error;
-        }
-    } catch (error) {
-        console.error('Error force deleting task:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Server Error'
-        });
-    }
-};
-
-// Add or remove tag from task
-exports.updateTaskTags = async (req, res) => {
-    try {
-        const { operation, tagId } = req.body;
-
-        if (!['add', 'remove'].includes(operation)) {
-            return res.status(400).json({
-                success: false,
-                error: 'Invalid operation. Use "add" or "remove"'
-            });
-        }
-
-        if (!isValidObjectId(tagId)) {
-            return res.status(400).json({
-                success: false,
-                error: 'Invalid tag ID'
-            });
-        }
-
-        // Verify tag belongs to user
-        const tag = await Tag.findOne({
-            _id: tagId,
-            user: req.user.id
-        });
-
-        if (!tag) {
-            return res.status(404).json({
-                success: false,
-                error: 'Tag not found or does not belong to user'
-            });
-        }
-
-        // Find task
-        const task = await Task.findOne({
-            _id: req.params.id,
-            user: req.user.id
-        });
-
-        if (!task) {
-            return res.status(404).json({
-                success: false,
-                error: 'Task not found'
-            });
-        }
-
-        // Add or remove tag
-        if (operation === 'add') {
-            // Check if tag already exists in task tags
-            if (!task.tags.includes(tagId)) {
-                task.tags.push(tagId);
-            }
-        } else {
-            // Remove tag from task tags
-            task.tags = task.tags.filter(id => id.toString() !== tagId);
-        }
-
-        await task.save();
-
-        // Populate for response
-        await task.populate('tags', 'name color');
+        // Populate references for response
+        await task.populate([
+            { path: 'category', select: 'name color icon' },
+            { path: 'tags', select: 'name color' },
+            { path: 'project', select: 'name color icon' },
+            { path: 'assignees.user', select: 'name avatar' }
+        ]);
 
         res.status(200).json({
             success: true,
             data: task
         });
     } catch (error) {
-        console.error('Error updating task tags:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Server Error'
+        next(error);
+    }
+};
+
+/**
+ * @desc    Delete a task
+ * @route   DELETE /api/tasks/:id
+ * @access  Private
+ */
+exports.deleteTask = async (req, res, next) => {
+    try {
+        const task = await Task.findById(req.params.id);
+
+        if (!task) {
+            return next(new ApiError('Task not found', 404));
+        }
+
+        // Check if user is authorized to delete this task
+        const isOwner = task.user.toString() === req.user._id.toString();
+
+        // If not owner, check if it's a project task and user is project manager
+        let hasProjectManagerAccess = false;
+
+        if (!isOwner && task.project) {
+            const project = await Project.findById(task.project);
+            if (project && project.isManagerOrOwner(req.user._id)) {
+                hasProjectManagerAccess = true;
+            }
+        }
+
+        if (!isOwner && !hasProjectManagerAccess) {
+            return next(new ApiError('Not authorized to delete this task', 403));
+        }
+
+        // Instead of deleting, mark as archived
+        task.status = 'archived';
+        await task.save();
+
+        res.status(200).json({
+            success: true,
+            data: {}
         });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * @desc    Permanently delete a task
+ * @route   DELETE /api/tasks/:id/force
+ * @access  Private
+ */
+exports.forceDeleteTask = async (req, res, next) => {
+    try {
+        const task = await Task.findById(req.params.id);
+
+        if (!task) {
+            return next(new ApiError('Task not found', 404));
+        }
+
+        // Check if user is authorized to delete this task
+        const isOwner = task.user.toString() === req.user._id.toString();
+
+        // If not owner, check if it's a project task and user is project manager
+        let hasProjectManagerAccess = false;
+
+        if (!isOwner && task.project) {
+            const project = await Project.findById(task.project);
+            if (project && project.isManagerOrOwner(req.user._id)) {
+                hasProjectManagerAccess = true;
+            }
+        }
+
+        if (!isOwner && !hasProjectManagerAccess) {
+            return next(new ApiError('Not authorized to delete this task', 403));
+        }
+
+        // Update all subtasks to remove parent reference
+        await Task.updateMany(
+            { parent: task._id },
+            { $unset: { parent: "" } }
+        );
+
+        // Completely delete the task
+        await task.remove();
+
+        res.status(200).json({
+            success: true,
+            data: {}
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * @desc    Update task tags
+ * @route   PATCH /api/tasks/:id/tags
+ * @access  Private
+ */
+exports.updateTaskTags = async (req, res, next) => {
+    try {
+        const { tags } = req.body;
+
+        let task = await Task.findById(req.params.id);
+
+        if (!task) {
+            return next(new ApiError('Task not found', 404));
+        }
+
+        // Check if user is authorized to update this task
+        const isOwnerOrAssignee =
+            task.user.toString() === req.user._id.toString() ||
+            task.assignees.some(assignee =>
+                assignee.user.toString() === req.user._id.toString()
+            );
+
+        if (!isOwnerOrAssignee) {
+            return next(new ApiError('Not authorized to update this task', 403));
+        }
+
+        // Update tags
+        task = await Task.findByIdAndUpdate(
+            req.params.id,
+            { tags },
+            { new: true, runValidators: true }
+        ).populate('tags', 'name color');
+
+        res.status(200).json({
+            success: true,
+            data: task
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * @desc    Assign task to user
+ * @route   POST /api/tasks/:id/assign
+ * @access  Private
+ */
+exports.assignTask = async (req, res, next) => {
+    try {
+        const { userId, role } = req.body;
+
+        let task = await Task.findById(req.params.id);
+
+        if (!task) {
+            return next(new ApiError('Task not found', 404));
+        }
+
+        // Check if user is authorized to assign this task
+        const isOwner = task.user.toString() === req.user._id.toString();
+
+        // If not owner, check if it's a project task and user is project manager
+        let hasProjectManagerAccess = false;
+
+        if (!isOwner && task.project) {
+            const project = await Project.findById(task.project);
+            if (project && project.isManagerOrOwner(req.user._id)) {
+                hasProjectManagerAccess = true;
+            }
+        }
+
+        if (!isOwner && !hasProjectManagerAccess) {
+            return next(new ApiError('Not authorized to assign this task', 403));
+        }
+
+        // Check if user is already assigned
+        const assigneeIndex = task.assignees.findIndex(
+            assignee => assignee.user.toString() === userId
+        );
+
+        if (assigneeIndex !== -1) {
+            // Update existing assignee's role
+            task.assignees[assigneeIndex].role = role || 'responsible';
+        } else {
+            // Add new assignee
+            task.assignees.push({
+                user: userId,
+                role: role || 'responsible'
+            });
+        }
+
+        await task.save();
+
+        // Populate for response
+        await task.populate({
+            path: 'assignees.user',
+            select: 'name avatar email'
+        });
+
+        res.status(200).json({
+            success: true,
+            data: task
+        });
+    } catch (error) {
+        next(error);
     }
 };
